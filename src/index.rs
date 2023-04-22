@@ -1,15 +1,18 @@
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
+use fuser::FileAttr;
 
 use slotmap::{new_key_type, SecondaryMap, SlotMap};
 
 new_key_type! {
-    struct FileKey;
+    pub struct FileKey;
 }
 
 pub type AllFiles = SlotMap<FileKey, File>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Tag(String);
+pub struct Tag(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File {
@@ -31,6 +34,13 @@ impl From<String> for Tag {
     }
 }
 
+// String -> Tag
+impl From<&str> for Tag {
+    fn from(tag: &str) -> Self {
+        Self::new(tag.to_string())
+    }
+}
+
 type TagFiles = SecondaryMap<FileKey, ()>;
 
 pub struct Tags {
@@ -42,4 +52,3 @@ impl Tags {
         self.tags.sort_by_key(|(_, files)| files.len())
     }
 }
-
