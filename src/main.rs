@@ -262,7 +262,7 @@ impl Filesystem for HelloFS {
 fn main() {
     let matches = Command::new("hello")
         .version(crate_version!())
-        .author("Christopher Berner")
+        .author("me")
         .arg(
             Arg::new("MOUNT_POINT")
                 .required(true)
