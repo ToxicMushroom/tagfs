@@ -24,50 +24,34 @@ struct HelloFS {
     source_path: String,
     tags: Tags,
     files: AllFiles,
-    tag_inode_cache: HashMap<u64, AllFileInformation>,
+    tag_inode_cache: HashMap<u64, TagNode>,
     inode_count: u64
 }
 
-struct AllFileInformation {
+struct TagNode {
     file: File,
     metadata: FileAttr,
+    parents: Vec<u64>, // inodes of parent tags (in order)
+    children: Vec<u64> // inodes of known children tags
 }
 
 impl HelloFS {
-    fn get_hfs_file_from_name(&self, name: &str) -> Option<File> {
-        return self.files.iter()
-            .find(|(_, file)| file.name.eq(name))
-            .map(|(_, file)| file.clone());
-    }
-}
 
-impl Filesystem for HelloFS {
-
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        // // read files from HelloFS.files and present them as files in the filesystem
-        // // read tags from HelloFS.tags and present them as directories in the filesystem
-        //
-        // for (tag, files) in self.tags.tags.iter() {
-        //     if parent == 1 && name.to_str() == Some(tag.as_str()) {
-        //         reply.entry(&TTL, &HELLO_DIR_ATTR, 0);
-        //     }
-        // }
-
+    fn lookup_source_file_attrs(&mut self, name: &OsStr) -> Option<FileAttr> {
         let source_path = (&self.source_path).to_string();
         let abs_path = source_path + "/" + name.to_str().unwrap();
 
         let metadata = fs::metadata(&abs_path);
         if metadata.is_ok() {
-            println!("Looked up: {}", abs_path);
+            println!("Looked up in source: {}", abs_path);
             let hfs_root_file = self.get_hfs_file_from_name(name.to_str().unwrap())
                 .unwrap();
             let metadata = metadata.unwrap();
             let ctime = metadata.created().unwrap_or(UNIX_EPOCH);
             if metadata.is_dir() {
-                return;
+                return None;
             }
-
-            reply.entry(&TTL, &FileAttr {
+            return Some(FileAttr {
                 ino: hfs_root_file.inode,
                 size: metadata.size(),
                 blocks: metadata.blocks(),
@@ -83,37 +67,82 @@ impl Filesystem for HelloFS {
                 rdev: metadata.rdev() as u32,
                 flags: 0,
                 blksize: metadata.blksize() as u32,
-            }, 0);
-            return;
-        } else {
-            let tag = &self.tags.tags.iter().find(|(tag, rc)| {
-                tag.0 == name.to_str().unwrap()
             });
-            if tag.is_some() {
-                reply.entry(&TTL, &FileAttr {
-                    ino: 5,
-                    size: 5,
-                    blocks: 5,
-                    atime: UNIX_EPOCH,
-                    mtime: UNIX_EPOCH,
-                    ctime: UNIX_EPOCH,
-                    crtime: UNIX_EPOCH,
-                    kind: FileType::Directory,
-                    perm: 0o755,
-                    nlink: 1,
-                    uid: 1000,
-                    gid: 1000,
-                    rdev: 0,
-                    blksize: 512,
-                    flags: 0,
-                }, 0);
-                return;
-            }
-
-            println!("Error: {:?}", metadata.err());
-            reply.error(ENOENT);
-            return;
         }
+        return None;
+    }
+
+    fn get_hfs_file_from_name(&self, name: &str) -> Option<File> {
+        return self.files.iter()
+            .find(|(_, file)| file.name.eq(name))
+            .map(|(_, file)| file.clone());
+    }
+}
+
+impl Filesystem for HelloFS {
+
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        if parent == 1 {
+            let source_file = &self.lookup_source_file_attrs(name);
+            if let Some(source_file) = source_file {
+                reply.entry(&TTL, source_file, 0);
+                return;
+            } else {
+                let tag = &self.tags.tags.iter().find(|(tag, rc)| {
+                    tag.0 == name.to_str().unwrap()
+                });
+                if tag.is_none() {
+                    /// no tag exists for [name]
+                    reply.error(ENOENT);
+                    return;
+                }
+
+                let res = &self.tag_inode_cache.iter()
+                    .filter(|(_, tag_node)| tag_node.parents.is_empty())
+                    .find(|(_, tag_node)| tag_node.file.name == name.to_str().unwrap());
+
+                if let Some((_, tag_node)) = res {
+                    reply.entry(&TTL, &tag_node.metadata, 0);
+                    return;
+                } else {
+                    /// Tag exists, but no inode exists for it yet, we play god and create one.
+                    let inode = self.inode_count;
+                    let tag_node = TagNode {
+                        file: File {
+                            fsize: 0,
+                            inode,
+                            name: name.to_str().unwrap().to_string(),
+                        },
+                        metadata: FileAttr {
+                            ino: inode,
+                            size: 5,
+                            blocks: 5,
+                            atime: UNIX_EPOCH,
+                            mtime: UNIX_EPOCH,
+                            ctime: UNIX_EPOCH,
+                            crtime: UNIX_EPOCH,
+                            kind: FileType::Directory,
+                            perm: 0o755,
+                            nlink: 1,
+                            uid: 1000,
+                            gid: 1000,
+                            rdev: 0,
+                            blksize: 512,
+                            flags: 0,
+                        },
+                        parents: vec![],
+                        children: vec![]
+                    };
+                    self.tag_inode_cache.insert(inode,tag_node);
+                    self.inode_count += 1;
+                    reply.entry(&TTL, &self.tag_inode_cache[&inode].metadata, 0);
+                    return;
+                }
+            }
+        }
+
+        reply.error(ENOENT);
+        return;
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
@@ -145,11 +174,6 @@ impl Filesystem for HelloFS {
         } else {
             reply.error(ENOENT);
         }
-    }
-
-    fn access(&mut self, _req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
-        println!("Accessing: {}", ino);
-        reply.ok();
     }
 
     fn read(
@@ -212,12 +236,6 @@ impl Filesystem for HelloFS {
             let tag = &entry.1;
             entries.push((tag.file.inode, FileType::Directory, tag.file.name.as_str()));
         }
-        //
-        // for (tag, _files) in self.tags.tags.iter() {
-        //     let name = &tag.0;
-        //
-        //     entries.push((9000, FileType::Directory, name));
-        // }
 
         for (_file_key, file) in self.files.iter() {
             entries.push((file.inode, FileType::RegularFile, file.name.as_str()));
@@ -231,6 +249,11 @@ impl Filesystem for HelloFS {
                 break;
             }
         }
+        reply.ok();
+    }
+
+    fn access(&mut self, _req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        println!("Accessing: {}", ino);
         reply.ok();
     }
 }
@@ -305,7 +328,7 @@ fn main() {
     let tags = vec!["all"];
     let mut inode_cache = HashMap::new();
     for tag in tags {
-        inode_cache.insert(i, AllFileInformation {
+        inode_cache.insert(i, TagNode {
             file: File {
                 fsize: 0,
                 name: tag.to_string(),
@@ -328,6 +351,8 @@ fn main() {
                 blksize: 512,
                 flags: 0,
             },
+            parents: vec![],
+            children: vec![],
         });
         i += 1;
     }
