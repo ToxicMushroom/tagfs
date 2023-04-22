@@ -1,8 +1,8 @@
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
-use fuser::FileAttr;
 
+use fuser::FileAttr;
 use slotmap::{new_key_type, SecondaryMap, SlotMap};
 
 new_key_type! {
@@ -12,7 +12,7 @@ new_key_type! {
 pub type AllFiles = SlotMap<FileKey, File>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Tag(String);
+pub struct Tag(pub(crate) String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File {

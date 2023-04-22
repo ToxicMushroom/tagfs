@@ -1,70 +1,39 @@
-mod index;
-
 use std::cmp::min;
-use clap::{crate_version, Arg, Command};
-use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request,
-};
-use libc::ENOENT;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+use std::iter::Map;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
+
+use clap::{Arg, Command, crate_version};
 use clap::ArgAction::SetTrue;
+use fuser::{FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, Request};
+use libc::ENOENT;
 use slotmap::{Key, SecondaryMap};
+
 use crate::index::{AllFiles, File, FileKey, Tags};
 
+mod index;
+
 const TTL: Duration = Duration::from_secs(1); // 1 second
-
-const HELLO_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::Directory,
-    perm: 0o755,
-    nlink: 2,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    flags: 0,
-    blksize: 512,
-};
-
-const HELLO_TXT_CONTENT: &str = "Hello World!\n";
-
-const HELLO_TXT_ATTR: FileAttr = FileAttr {
-    ino: 2,
-    size: 13,
-    blocks: 1,
-    atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::RegularFile,
-    perm: 0o644,
-    nlink: 1,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    flags: 0,
-    blksize: 512,
-};
 
 struct HelloFS {
     source_path: String,
     tags: Tags,
-    files: AllFiles
+    files: AllFiles,
+    tag_inode_cache: HashMap<u64, AllFileInformation>,
+    inode_count: u64
+}
+
+struct AllFileInformation {
+    file: File,
+    metadata: FileAttr,
 }
 
 impl HelloFS {
-
     fn get_hfs_file_from_name(&self, name: &str) -> Option<File> {
         return self.files.iter()
             .find(|(_, file)| file.name.eq(name))
@@ -73,6 +42,7 @@ impl HelloFS {
 }
 
 impl Filesystem for HelloFS {
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         // // read files from HelloFS.files and present them as files in the filesystem
         // // read tags from HelloFS.tags and present them as directories in the filesystem
@@ -83,51 +53,103 @@ impl Filesystem for HelloFS {
         //     }
         // }
 
-        if parent == 1 { // in root
-            let source_path = (&self.source_path).to_string();
-            let abs_path = source_path + "/" + name.to_str().unwrap();
+        let source_path = (&self.source_path).to_string();
+        let abs_path = source_path + "/" + name.to_str().unwrap();
 
-            println!("looking up: {}", abs_path);
-            let metadata = fs::metadata(abs_path);
-            if metadata.is_ok() {
-                let hfs_root_file = self.get_hfs_file_from_name(name.to_str().unwrap())
-                    .unwrap();
-                let metadata = metadata.unwrap();
-                let ctime = metadata.created().unwrap_or(UNIX_EPOCH);
-                reply.entry(&TTL, &FileAttr {
-                    ino: hfs_root_file.inode,
-                    size: metadata.size(),
-                    blocks: metadata.blocks(),
-                    atime: metadata.accessed().unwrap_or(UNIX_EPOCH), // 1970-01-01 00:00:00
-                    mtime: metadata.modified().unwrap_or(UNIX_EPOCH),
-                    ctime,
-                    crtime: ctime,
-                    kind: FileType::RegularFile,
-                    perm: metadata.permissions().mode() as u16,
-                    nlink: metadata.nlink() as u32,
-                    uid: metadata.uid(),
-                    gid: metadata.gid(),
-                    rdev: metadata.rdev() as u32,
-                    flags: 0,
-                    blksize: metadata.blksize() as u32,
-                }, 0);
-                return;
-
-            } else {
-                reply.error(ENOENT);
+        let metadata = fs::metadata(&abs_path);
+        if metadata.is_ok() {
+            println!("Looked up: {}", abs_path);
+            let hfs_root_file = self.get_hfs_file_from_name(name.to_str().unwrap())
+                .unwrap();
+            let metadata = metadata.unwrap();
+            let ctime = metadata.created().unwrap_or(UNIX_EPOCH);
+            if metadata.is_dir() {
                 return;
             }
+
+            reply.entry(&TTL, &FileAttr {
+                ino: hfs_root_file.inode,
+                size: metadata.size(),
+                blocks: metadata.blocks(),
+                atime: metadata.accessed().unwrap_or(UNIX_EPOCH), // 1970-01-01 00:00:00
+                mtime: metadata.modified().unwrap_or(UNIX_EPOCH),
+                ctime,
+                crtime: ctime,
+                kind: FileType::RegularFile,
+                perm: metadata.permissions().mode() as u16,
+                nlink: metadata.nlink() as u32,
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                rdev: metadata.rdev() as u32,
+                flags: 0,
+                blksize: metadata.blksize() as u32,
+            }, 0);
+            return;
+        } else {
+            let tag = &self.tags.tags.iter().find(|(tag, rc)| {
+                tag.0 == name.to_str().unwrap()
+            });
+            if tag.is_some() {
+                reply.entry(&TTL, &FileAttr {
+                    ino: 5,
+                    size: 5,
+                    blocks: 5,
+                    atime: UNIX_EPOCH,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    crtime: UNIX_EPOCH,
+                    kind: FileType::Directory,
+                    perm: 0o755,
+                    nlink: 1,
+                    uid: 1000,
+                    gid: 1000,
+                    rdev: 0,
+                    blksize: 512,
+                    flags: 0,
+                }, 0);
+                return;
+            }
+
+            println!("Error: {:?}", metadata.err());
+            reply.error(ENOENT);
+            return;
+        }
+    }
+
+    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        let x = &self.tag_inode_cache.get(&ino);
+        println!("Getting attr for: {}", ino);
+        if let Some(file) = x {
+            reply.attr(&TTL, &file.metadata);
+            return;
+        }
+
+        if ino == 1 {
+            reply.attr(&TTL, &FileAttr {
+                ino,
+                size: 5,
+                blocks: 5,
+                atime: UNIX_EPOCH,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                crtime: UNIX_EPOCH,
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                blksize: 512,
+                flags: 0,
+            })
         } else {
             reply.error(ENOENT);
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        match ino {
-            1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
-            2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
-            _ => reply.error(ENOENT),
-        }
+    fn access(&mut self, _req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        println!("Accessing: {}", ino);
+        reply.ok();
     }
 
     fn read(
@@ -153,7 +175,7 @@ impl Filesystem for HelloFS {
                 buf.resize(size as usize, 0);
                 println!("allocated buffer with: {} len", size);
 
-                let mut sys_file = std::fs::File::open(abs_path).expect("Error opening file");
+                let mut sys_file = fs::File::open(abs_path).expect("Error opening file");
                 sys_file.seek(SeekFrom::Start(offset as u64))
                     .expect("offset might be outside of file");
 
@@ -179,19 +201,29 @@ impl Filesystem for HelloFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        if ino != 1 {
-            reply.error(ENOENT);
-            return;
-        }
+        println!("readdir called with ino: {}", ino);
 
         let mut entries = vec![
             (1, FileType::Directory, "."),
             (1, FileType::Directory, ".."),
         ];
 
+        for entry in self.tag_inode_cache.iter() {
+            let tag = &entry.1;
+            entries.push((tag.file.inode, FileType::Directory, tag.file.name.as_str()));
+        }
+        //
+        // for (tag, _files) in self.tags.tags.iter() {
+        //     let name = &tag.0;
+        //
+        //     entries.push((9000, FileType::Directory, name));
+        // }
+
         for (_file_key, file) in self.files.iter() {
             entries.push((file.inode, FileType::RegularFile, file.name.as_str()));
         }
+
+        println!("{:?}", entries);
 
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
             // i + 1 means the index of the next entry
@@ -269,7 +301,39 @@ fn main() {
         map.insert(file_key, ());
         i += 1;
     }
+
+    let tags = vec!["all"];
+    let mut inode_cache = HashMap::new();
+    for tag in tags {
+        inode_cache.insert(i, AllFileInformation {
+            file: File {
+                fsize: 0,
+                name: tag.to_string(),
+                inode: i,
+            },
+            metadata: FileAttr {
+                ino: i,
+                size: 0,
+                blocks: 0,
+                atime: UNIX_EPOCH,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                crtime: UNIX_EPOCH,
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                blksize: 512,
+                flags: 0,
+            },
+        });
+        i += 1;
+    }
+
     println!("Loaded: {} files from `{}`", i, source_path);
+    println!("Inode cache: {:?}", &inode_cache.keys());
 
     let filesystem = HelloFS {
         source_path: source_path.to_string(),
@@ -277,6 +341,8 @@ fn main() {
             tags: vec![("all".into(), Rc::new(map))],
         },
         files,
+        tag_inode_cache: inode_cache,
+        inode_count: i
     };
     fuser::mount2(filesystem, mountpoint, &options).unwrap();
 }
