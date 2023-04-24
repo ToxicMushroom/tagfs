@@ -1,5 +1,3 @@
-use bincode::config;
-use bincode::serde::Compat;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -11,13 +9,16 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use bincode::config;
+use bincode::serde::Compat;
+use clap::{Arg, Command, crate_version};
 use clap::ArgAction::SetTrue;
-use clap::{crate_version, Arg, Command};
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, Request,
 };
-use libc::{ENOENT, regex_t};
+use fuser::FileType::Directory;
+use libc::{EBADR, ENOENT, regex_t};
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::index::{AllFiles, File, FileKey, PersistentState, Tag, TagFiles, Tags};
@@ -313,18 +314,37 @@ impl Filesystem for HelloFS {
         mut reply: ReplyDirectory,
     ) {
         println!("readdir called with ino: {}", ino);
+        let tag_node = self.tag_inode_cache.get(&ino);
+        if tag_node.is_none() || tag_node.unwrap().metadata.kind != Directory {
+            reply.error(EBADR);
+            return;
+        }
+        let tag_node = tag_node.unwrap();
+        let parent_dir = tag_node.parent.unwrap_or(1);
 
         let mut entries = vec![
-            (1, FileType::Directory, "."),
-            (1, FileType::Directory, ".."),
+            (parent_dir, Directory, "."),
+            (parent_dir, Directory, ".."),
         ];
 
-        for entry in self.tag_inode_cache.iter() {
-            let tag = &entry.1;
-            entries.push((tag.file.inode, FileType::Directory, tag.file.name.as_str()));
+        let path_tags = self.traverse_collect_tags(ino);
+        for (tag, _) in self.tags.tags.iter() {
+            // skip path tags
+            if path_tags.contains(tag) { continue; }
+            let (_ino, tag_node) = self.tag_inode_cache.iter()
+                .find(|(inode, tag_node)| tag_node.file.name == tag.0)
+                .unwrap();
+
+            entries.push((tag_node.file.inode, Directory, tag_node.file.name.as_str()));
         }
 
-        for (_file_key, file) in self.files.iter() {
+        let relevant_tags = if ino == 1 {
+            self.files.iter().map(|t|t.1).collect::<Vec<&File>>()
+        } else{
+            self.find_tagged_files(ino)
+        };
+
+        for file in relevant_tags {
             entries.push((file.inode, FileType::RegularFile, file.name.as_str()));
         }
 
@@ -521,8 +541,10 @@ fn load_files(
 mod test {
     use std::collections::HashMap;
     use std::rc::Rc;
+
     use fuser::FileAttr;
     use slotmap::SlotMap;
+
     use crate::{HelloFS, TagNode};
     use crate::index::{AllFiles, File, Tag, TagFiles, Tags};
 
