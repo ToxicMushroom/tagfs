@@ -36,12 +36,12 @@ struct HelloFS {
 }
 
 struct TagNode {
-    file: File,
-    metadata: FileAttr,
+    pub file: File,
+    pub metadata: FileAttr,
     // inode of parent tag
-    parent: Option<u64>,
+    pub parent: Option<u64>,
     // inodes of known children tags
-    children: Vec<u64>,
+    pub children: Vec<u64>,
 }
 
 impl HelloFS {
@@ -220,19 +220,60 @@ impl Filesystem for HelloFS {
                 }
             }
         } else {
-            let x = &self.tag_inode_cache.get(&parent);
+            let x = self.tag_inode_cache.get(&parent);
             if let Some(tag_node) = x {
                 // to get tagged files, intersect all parents their RC<File> lists
                 let tagged_files: Vec<&File> = self.find_tagged_files(parent);
-                println!("{:?}", tagged_files);
+                println!("intersection: {:?}", tagged_files);
 
-                ()
+                let found_file = tagged_files.iter().find(|file| {
+                    file.name == name.to_str().unwrap()
+                });
 
+                // check if it is a tagged file
+                if found_file.is_some() {
+                    let found_file = found_file.unwrap();
+                    let attr = HelloFS::create_file_attrs(found_file.inode, found_file.fsize);
+                    reply.entry(&TTL, &attr, 0);
+                    return;
+                }
 
                 // if not a tagged file, maybe looking for a subtag ?
-                // check all children their tagnodes for a matching name, if there return
-                // check parents for matching name, if there no entry
-                // otherwise we need to create a new tagnode, add it as child to the parent
+                // check all children their tagnodes for a matching name, if there: return it
+                for child in tag_node.children.iter() {
+                    let child_node = self.tag_inode_cache.get(child);
+                    if let Some(child_node) = child_node {
+                        if child_node.file.name == name.to_str().unwrap() {
+                            reply.entry(&TTL, &child_node.metadata, 0);
+                            return;
+                        }
+                    }
+                }
+
+                // check parents for matching name, if there: return no entry
+                for tag in self.traverse_collect_tags(parent).iter() {
+                    if tag.0 == name.to_str().unwrap() {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+
+                // otherwise we need to create a new tagnode, add it as child to the parent, return it
+                let inode = self.inode_count;
+                let tag_node = TagNode {
+                    file: File {
+                        fsize: 0,
+                        inode,
+                        name: name.to_str().unwrap().to_string(),
+                    },
+                    metadata: HelloFS::create_folder_attrs(inode),
+                    parent: Some(parent),
+                    children: vec![],
+                };
+                self.tag_inode_cache.insert(inode, tag_node);
+                self.inode_count += 1;
+                reply.entry(&TTL, &self.tag_inode_cache[&inode].metadata, 0);
+                return;
             }
         }
 
@@ -256,11 +297,22 @@ impl Filesystem for HelloFS {
     }
 
     fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
-        if (parent == 1) {}
-
-        reply.entry(&TTL, &HelloFS::create_folder_attrs(self.inode_count), 0);
-
-        self.inode_count += 1
+        let inode = self.inode_count;
+        let tag_node = TagNode {
+            file: File {
+                fsize: 0,
+                inode,
+                name: name.to_str().unwrap().to_string(),
+            },
+            metadata: HelloFS::create_folder_attrs(inode),
+            parent: Some(parent),
+            children: vec![],
+        };
+        self.tag_inode_cache.insert(inode, tag_node);
+        self.inode_count += 1;
+        reply.entry(&TTL, &self.tag_inode_cache[&inode].metadata, 0);
+        self.tags.tags.push((Tag(name.to_str().unwrap().to_string()), Rc::new(Default::default())));
+        return;
     }
 
     fn read(
@@ -339,8 +391,8 @@ impl Filesystem for HelloFS {
         }
 
         let relevant_tags = if ino == 1 {
-            self.files.iter().map(|t|t.1).collect::<Vec<&File>>()
-        } else{
+            self.files.iter().map(|t| t.1).collect::<Vec<&File>>()
+        } else {
             self.find_tagged_files(ino)
         };
 
@@ -631,7 +683,7 @@ mod test {
             tags: Tags {
                 tags: vec![
                     ("tag1".into(), Rc::new(tag1_files)),
-                    ("tag2".into(), Rc::new(tag2_files))
+                    ("tag2".into(), Rc::new(tag2_files)),
                 ]
             },
             files,
