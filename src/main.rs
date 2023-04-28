@@ -15,10 +15,10 @@ use bincode::config::Configuration;
 use bincode::serde::Compat;
 use clap::{Arg, Command, crate_version};
 use clap::ArgAction::SetTrue;
-use fuser::{FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, Request};
+use fuser::{FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyStatfs, Request};
 use fuser::FileType::Directory;
-use libc::{EBADR, ENOENT, ENOSYS, ENOTSUP, regex_t};
-use log::{info, LevelFilter};
+use libc::{EBADF, EBADR, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTSUP, regex_t};
+use log::{debug, info, LevelFilter};
 use pretty_env_logger::env_logger::Builder;
 use pretty_env_logger::env_logger::fmt::Formatter;
 use slotmap::{SecondaryMap, SlotMap};
@@ -27,8 +27,8 @@ use crate::index::{AllFiles, File, FileKey, PersistentState, Tag, TagFiles, Tags
 
 mod index;
 
-const TTL: Duration = Duration::from_secs(3);
-// 1 secondTrying to read:
+const TTL: Duration = Duration::from_nanos(1);
+// 1 second
 const INODE_SPLIT: u64 = 32;
 const ROOT_INO: u64 = 1;
 
@@ -356,12 +356,12 @@ impl Filesystem for HelloFS {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        info!("Getting attr for: {}", ino);
+        debug!("Getting attr for: {}", ino);
 
         let mut ino = ino;
         if is_file_ino(ino) {
             // drop first 32 bits
-            info!("converted tagged ino into root ino for file: {}", ino);
+            debug!("converted tagged ino into root ino for file: {}", ino);
             ino = ino & !0u32 as u64;
         }
 
@@ -454,7 +454,7 @@ impl Filesystem for HelloFS {
     ) {
         info!("Trying to read: {} from {}", ino, offset);
         if !is_file_ino(ino) {
-            reply.error(EBADR);
+            reply.error(EISDIR);
             return
         }
         let mut ino = ino;
@@ -470,8 +470,9 @@ impl Filesystem for HelloFS {
 
                 let mut buf = Vec::new();
                 buf.resize(size as usize, 0);
-                info!("allocated buffer with: {} len", size);
+                debug!("allocated buffer with: {} len", size);
 
+                debug!("Opening file: {}", abs_path);
                 let mut sys_file = fs::File::open(abs_path).expect("Error opening file");
                 sys_file
                     .seek(SeekFrom::Start(offset as u64))
@@ -480,15 +481,15 @@ impl Filesystem for HelloFS {
                 let mut_slice = buf.as_mut_slice();
                 sys_file.read_exact(mut_slice).expect("Error reading file");
 
-                info!("Reading: {} {}", file.inode, file.name);
+                debug!("Reading: {} {}", file.inode, file.name);
 
-                info!("Skipped {:?}, read bytes: {:?}", offset, mut_slice.len());
+                debug!("Skipped {:?}, read bytes: {:?}", offset, mut_slice.len());
                 reply.data(mut_slice);
                 return;
             }
         }
 
-        reply.error(ENOENT);
+        reply.error(EBADF);
     }
 
     fn readdir(
@@ -499,17 +500,22 @@ impl Filesystem for HelloFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        info!("readdir called with ino: {}, offset: {}", ino, offset);
+        debug!("readdir called with ino: {}, offset: {}", ino, offset);
         let tag_node = self.tag_inode_cache.get(&ino);
-        if tag_node.is_none() || tag_node.unwrap().metadata.kind != Directory {
-            reply.error(ENOSYS);
-            info!("readdir exited: not a directory");
+        if tag_node.is_none() {
+            reply.error(ENOENT);
+            debug!("readdir exited: no such directory");
+            return;
+        } else if tag_node.unwrap().metadata.kind != Directory {
+            reply.error(ENOTDIR);
+            debug!("readdir exited: not a directory");
             return;
         }
+
         let tag_node = tag_node.unwrap();
         let parent_dir = tag_node.parent.unwrap_or(ROOT_INO);
 
-        let mut entries = vec![(parent_dir, Directory, "."), (parent_dir, Directory, "..")];
+        let mut entries = vec![(ino, Directory, "."), (parent_dir, Directory, "..")];
 
         let path_tags = self.traverse_collect_tags(ino);
         for (tag, _) in self.tags.tags.iter() {
@@ -538,7 +544,7 @@ impl Filesystem for HelloFS {
 
         entries.drain(0..offset as usize);
 
-        info!("readdir returning: {:?}", entries);
+        debug!("readdir returning: {:?}", entries.iter().skip(offset as usize).collect::<Vec<&(u64, FileType, &str)>>());
 
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
             // i + 1 means the index of the next entry
@@ -546,7 +552,13 @@ impl Filesystem for HelloFS {
                 break;
             }
         }
+
         reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        debug!("statfs called");
+        reply.statfs(0, 0, 0, 7, 0, 512, 255, 0);
     }
 
     fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
