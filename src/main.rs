@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use bincode::config;
+use bincode::config::Configuration;
 use bincode::serde::Compat;
 use clap::{Arg, Command, crate_version};
 use clap::ArgAction::SetTrue;
@@ -27,7 +28,7 @@ use crate::index::{AllFiles, File, FileKey, PersistentState, Tag, TagFiles, Tags
 mod index;
 
 const TTL: Duration = Duration::from_secs(3);
-// 1 second
+// 1 secondTrying to read:
 const INODE_SPLIT: u64 = 32;
 const ROOT_INO: u64 = 1;
 
@@ -49,6 +50,13 @@ struct HelloFS {
     fi_count: u64,
     // tag inode count
     ti_count: u64,
+}
+
+impl HelloFS {
+    fn save(&self) {
+        let config = config::standard();
+        save_state(config, &self.files, &self.tags);
+    }
 }
 
 // Tag operations
@@ -293,7 +301,7 @@ impl Filesystem for HelloFS {
                 // check if it is a tagged file
                 if found_file.is_some() {
                     let found_file = found_file.unwrap();
-                    let attr = HelloFS::create_file_attrs(parent | found_file.inode, found_file.fsize);
+                    let attr = HelloFS::create_file_attrs(augment_with_tag_ino(found_file.inode, parent), found_file.fsize);
                     reply.entry(&TTL, &attr, 0);
                     return;
                 }
@@ -446,6 +454,7 @@ impl Filesystem for HelloFS {
     ) {
         info!("Trying to read: {} from {}", ino, offset);
         if !is_file_ino(ino) {
+            reply.error(EBADR);
             return
         }
         let mut ino = ino;
@@ -524,7 +533,7 @@ impl Filesystem for HelloFS {
         };
 
         for file in relevant_files {
-            entries.push((ino | file.inode, FileType::RegularFile, file.name.as_str()));
+            entries.push((augment_with_tag_ino(file.inode, ino), FileType::RegularFile, file.name.as_str()));
         }
 
         entries.drain(0..offset as usize);
@@ -543,6 +552,13 @@ impl Filesystem for HelloFS {
     fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
         reply.ok();
     }
+}
+
+const fn augment_with_tag_ino(file_ino: u64, tag_ino: u64) -> u64 {
+    if tag_ino == ROOT_INO {
+        return file_ino;
+    }
+    return tag_ino | file_ino;
 }
 
 const fn tag_ino_from_count(count: u64) -> u64 {
@@ -674,11 +690,7 @@ fn main() {
     info!("Loaded: {} files from `{}`", fi_count, source_path);
     info!("Inode cache: {:?}", &inode_cache.keys());
 
-    let persistent_state = PersistentState {
-        files: files.clone(),
-        tags: tag_files.clone(),
-    };
-    let encoded: Vec<u8> = bincode::encode_to_vec(Compat(&persistent_state), config).unwrap();
+    let encoded = save_state(config, &mut files, &tag_files);
     fs::write("savefile", encoded).expect("couldn't save");
     info!("saved file");
 
@@ -692,6 +704,15 @@ fn main() {
     };
 
     fuser::mount2(filesystem, mountpoint, &options).unwrap();
+}
+
+fn save_state(config: Configuration, files: &SlotMap<FileKey, File>, tag_files: &Tags) -> Vec<u8> {
+    let persistent_state = PersistentState {
+        files: files.clone(),
+        tags: tag_files.clone(),
+    };
+    let encoded: Vec<u8> = bincode::encode_to_vec(Compat(&persistent_state), config).unwrap();
+    encoded
 }
 
 fn setup_logger() {
