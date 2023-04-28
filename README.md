@@ -27,7 +27,10 @@ example fs root:
    - file2.mp4
 
 ## roadmap
-- [ ] basic tagging
+- [x] basic tagging
+- [x] renaming tags
+- [ ] remove tags
+- [ ] remove tag from file
 - [ ] save file
 - [ ] recovery of a file's tags on rename/move/inode change | portability of the save file
 - [ ] configuration for showing what tags and when (always show all tags even if empty, usefull for tagging new files)
