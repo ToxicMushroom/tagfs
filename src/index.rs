@@ -1,10 +1,7 @@
-
+use std::cell::RefCell;
 use std::rc::Rc;
 
-new_key_type! {
-    // #[derive(Serialize, Deserialize)]
-    pub struct FileKey;
-}
+use slotmap::{new_key_type, SecondaryMap, SlotMap};
 // impl bincode::Encode for FileKey {
 //     fn encode<E: bincode::enc::Encoder>(
 //         &self,
@@ -34,8 +31,11 @@ new_key_type! {
 //     }
 // }
 use slotmap::__impl::{Deserialize, Serialize};
-use slotmap::{new_key_type, SecondaryMap, SlotMap};
 
+new_key_type! {
+    // #[derive(Serialize, Deserialize)]
+    pub struct FileKey;
+}
 pub type AllFiles = SlotMap<FileKey, File>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,7 +73,7 @@ pub(crate) type TagFiles = SecondaryMap<FileKey, ()>;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Tags {
-    pub tags: Vec<(Tag, Rc<TagFiles>)>,
+    pub tags: Vec<(Tag, Rc<RefCell<TagFiles>>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,6 +84,6 @@ pub struct PersistentState {
 
 impl Tags {
     pub fn sort(&mut self) {
-        self.tags.sort_by_key(|(_, files)| files.len())
+        self.tags.sort_by_key(|(_, files)| files.borrow().len())
     }
 }
