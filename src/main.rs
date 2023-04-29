@@ -426,6 +426,7 @@ impl Filesystem for HelloFS {
                     self.rename_tag(tag, newname);
                     self.tag_inode_cache.get_mut(&parent).unwrap().file.name = newname.to_str().unwrap().to_string();
                     reply.ok();
+                    self.save();
                     return;
                 }
             }
@@ -435,6 +436,7 @@ impl Filesystem for HelloFS {
             if let Some((fk, _file)) = file_opt {
                 self.add_tag_to_file(newparent, fk);
                 reply.ok();
+                self.save();
                 return;
             }
         }
@@ -447,7 +449,7 @@ impl Filesystem for HelloFS {
         ino: u64,
         _fh: u64,
         offset: i64,
-        size: u32,
+        max_size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
@@ -455,7 +457,7 @@ impl Filesystem for HelloFS {
         info!("Trying to read: {} from {}", ino, offset);
         if !is_file_ino(ino) {
             reply.error(EISDIR);
-            return
+            return;
         }
         let mut ino = ino;
         // drop tag bits
@@ -466,9 +468,22 @@ impl Filesystem for HelloFS {
                 let source_path = (&self.source_path).to_string();
                 let abs_path = source_path + "/" + file.name.as_str();
 
-                let size = min(file.fsize - offset as u64, size as u64);
+                let size = max_size as u64;
+                // let size = min(file.fsize - offset as u64, max_size as u64);
 
                 let mut buf = Vec::new();
+
+                // From fuser docs
+                // Read should send exactly the number of bytes requested except on EOF or error
+
+                // From man7 read.2
+                // If the file offset is at or past the end of file,
+                //        no bytes are read, and read() returns zero.
+                if offset as u64 >= file.fsize {
+                    reply.data(buf.as_mut_slice());
+                    return;
+                }
+
                 buf.resize(size as usize, 0);
                 debug!("allocated buffer with: {} len", size);
 
@@ -479,17 +494,17 @@ impl Filesystem for HelloFS {
                     .expect("offset might be outside of file");
 
                 let mut_slice = buf.as_mut_slice();
-                sys_file.read_exact(mut_slice).expect("Error reading file");
+                sys_file.read(mut_slice).expect("Error reading file");
 
                 debug!("Reading: {} {}", file.inode, file.name);
 
-                debug!("Skipped {:?}, read bytes: {:?}", offset, mut_slice.len());
+                debug!("Skipped {:?}, read bytes: {:?}, total read: {}", offset, mut_slice.len(), offset + mut_slice.len() as i64);
                 reply.data(mut_slice);
                 return;
             }
         }
 
-        reply.error(EBADF);
+        reply.error(ENOENT);
     }
 
     fn readdir(
@@ -582,7 +597,7 @@ const fn is_file_ino(ino: u64) -> bool {
         false
     } else {
         (ino & !0u32 as u64) != 0
-    }
+    };
 }
 
 fn main() {
@@ -623,15 +638,15 @@ fn main() {
     let source_path: &String = matches.get_one("SOURCE").unwrap();
     let paths = fs::read_dir(source_path).unwrap();
 
-    let mut options = vec![MountOption::RW, MountOption::FSName("miauw".to_string())];
+    let mut options = vec![
+        MountOption::RW, MountOption::FSName("miauw".to_string()),
+        MountOption::Sync, MountOption::DirSync,
+    ];
 
     if matches.get_flag("auto-unmount") {
         options.push(MountOption::AutoUnmount);
         options.push(MountOption::AllowRoot);
     }
-    // if matches.get_flag("allow-root") {
-    //
-    // }
 
     let mut files = AllFiles::default();
 
@@ -732,7 +747,7 @@ fn setup_logger() {
     let mut builder = Builder::new();
 
     // Set the minimum log level to `Debug`
-    builder.filter_level(LevelFilter::Info);
+    builder.filter_level(LevelFilter::Debug);
 
     // Configure the log format
     builder.format_timestamp_secs();
@@ -895,7 +910,7 @@ mod test {
             files,
             tag_inode_cache: inode_cache,
             ti_count: 3,
-            fi_count: 1
+            fi_count: 1,
         };
 
         assert_eq!(
