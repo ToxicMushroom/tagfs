@@ -2,38 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use slotmap::{new_key_type, SecondaryMap, SlotMap};
-// impl bincode::Encode for FileKey {
-//     fn encode<E: bincode::enc::Encoder>(
-//         &self,
-//         encoder: &mut E,
-//     ) -> Result<(), bincode::error::EncodeError> {
-//         Encode::encode(&self.0.as_ffi(), encoder)?;
-//         Ok(())
-//     }
-// }
-//
-// impl bincode::Decode for FileKey {
-//     fn decode<D: Decoder>(
-//         decoder: &mut D,
-//     ) -> Result<Self, DecodeError> {
-//         Ok(Self {
-//             0: KeyData::from_ffi(Decode::decode(decoder)?),
-//         })
-//     }
-// }
-// impl<'de> bincode::BorrowDecode<'de> for FileKey {
-//     fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-//         decoder: &mut D,
-//     ) -> Result<Self, DecodeError> {
-//         Ok(Self {
-//             0: KeyData::from_ffi(bincode::BorrowDecode::borrow_decode(decoder)?)
-//         })
-//     }
-// }
 use slotmap::__impl::{Deserialize, Serialize};
 
 new_key_type! {
-    // #[derive(Serialize, Deserialize)]
     pub struct FileKey;
 }
 pub type AllFiles = SlotMap<FileKey, File>;

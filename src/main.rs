@@ -6,7 +6,7 @@ use std::fs;
 use std::fs::ReadDir;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Deref;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -15,7 +15,7 @@ use bincode::config::Configuration;
 use bincode::serde::Compat;
 use clap::{Arg, Command, crate_version};
 use clap::ArgAction::SetTrue;
-use fuser::{FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyStatfs, Request};
+use fuser::{FileAttr, Filesystem, FileType, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request};
 use fuser::FileType::Directory;
 use libc::{EBADF, EBADR, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTSUP, regex_t};
 use log::{debug, info, LevelFilter};
@@ -27,7 +27,7 @@ use crate::index::{AllFiles, File, FileKey, PersistentState, Tag, TagFiles, Tags
 
 mod index;
 
-const TTL: Duration = Duration::from_nanos(1);
+const TTL: Duration = Duration::new(0, 0);
 // 1 second
 const INODE_SPLIT: u64 = 32;
 const ROOT_INO: u64 = 1;
@@ -50,12 +50,23 @@ struct HelloFS {
     fi_count: u64,
     // tag inode count
     ti_count: u64,
+    // file_handle count
+    fh_count: u64,
 }
 
 impl HelloFS {
     fn save(&self) {
         let config = config::standard();
         save_state(config, &self.files, &self.tags);
+    }
+
+    fn get_next_file_handle(&mut self) -> u64 {
+        self.fh_count += 1;
+        self.fh_count
+    }
+
+    fn ino_exists(&mut self, ino: &u64) -> bool {
+        return self.tag_inode_cache.contains_key(&ino) || self.files.iter().any(|f| &f.1.inode == ino);
     }
 }
 
@@ -255,6 +266,7 @@ impl Filesystem for HelloFS {
                     .find(|(tag, rc)| tag.0 == name.to_str().unwrap());
                 if tag.is_none() {
                     /// no tag exists for [name]
+                    debug!("no tag exists for [{:?}]", name.to_str().unwrap());
                     reply.error(ENOENT);
                     return;
                 }
@@ -370,10 +382,49 @@ impl Filesystem for HelloFS {
         if let Some(file) = x {
             reply.attr(&TTL, &file.metadata);
             return;
+        } else if let Some((_, file)) = &self.files.iter().find(|(fk, f)| {
+           f.inode == ino
+        }) {
+            reply.attr(&TTL, &HelloFS::create_file_attrs(ino,file.fsize));
+            return;
         }
 
         if ino == ROOT_INO {
             reply.attr(&TTL, &HelloFS::create_folder_attrs(ino))
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if self.ino_exists(&ino) {
+            debug!("Opened file: {}", ino);
+            reply.opened(self.get_next_file_handle(), 0);
+        } else {
+            debug!("File does not exist: {}", ino);
+            reply.error(ENOENT);
+        }
+    }
+
+    fn release(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+        if self.ino_exists(&ino) {
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if self.ino_exists(&ino) {
+            reply.opened(self.get_next_file_handle(), 0);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn releasedir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, reply: ReplyEmpty) {
+        if self.ino_exists(&ino) {
+            reply.ok();
         } else {
             reply.error(ENOENT);
         }
@@ -449,62 +500,44 @@ impl Filesystem for HelloFS {
         ino: u64,
         _fh: u64,
         offset: i64,
-        max_size: u32,
+        size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
         info!("Trying to read: {} from {}", ino, offset);
+        assert!(offset >= 0);
         if !is_file_ino(ino) {
             reply.error(EISDIR);
             return;
         }
+
         let mut ino = ino;
         // drop tag bits
         ino = ino & !0u32 as u64;
 
+        let mut optional_path: Option<String> = None;
         for (_key, file) in self.files.iter() {
             if file.inode == ino {
-                let source_path = (&self.source_path).to_string();
-                let abs_path = source_path + "/" + file.name.as_str();
-
-                let size = max_size as u64;
-                // let size = min(file.fsize - offset as u64, max_size as u64);
-
-                let mut buf = Vec::new();
-
-                // From fuser docs
-                // Read should send exactly the number of bytes requested except on EOF or error
-
-                // From man7 read.2
-                // If the file offset is at or past the end of file,
-                //        no bytes are read, and read() returns zero.
-                if offset as u64 >= file.fsize {
-                    reply.data(buf.as_mut_slice());
-                    return;
-                }
-
-                buf.resize(size as usize, 0);
-                debug!("allocated buffer with: {} len", size);
-
-                debug!("Opening file: {}", abs_path);
-                let mut sys_file = fs::File::open(abs_path).expect("Error opening file");
-                sys_file
-                    .seek(SeekFrom::Start(offset as u64))
-                    .expect("offset might be outside of file");
-
-                let mut_slice = buf.as_mut_slice();
-                sys_file.read(mut_slice).expect("Error reading file");
-
-                debug!("Reading: {} {}", file.inode, file.name);
-
-                debug!("Skipped {:?}, read bytes: {:?}, total read: {}", offset, mut_slice.len(), offset + mut_slice.len() as i64);
-                reply.data(mut_slice);
-                return;
+                optional_path = Some((&self.source_path).to_string()+ "/" + file.name.as_str()) ;
             }
         }
 
-        reply.error(ENOENT);
+        if let Some(path) = optional_path {
+            if let Ok(file) = fs::File::open(&path) {
+                debug!("Opened file for reading: {}", path);
+                let file_size = file.metadata().unwrap().len();
+                let read_size = min(size, file_size.saturating_sub(offset as u64) as u32);
+
+                let mut buffer = vec![0; read_size as usize];
+                file.read_exact_at(&mut buffer, offset as u64).unwrap();
+                reply.data(&buffer);
+            } else {
+                reply.error(ENOENT);
+            }
+        } else {
+            reply.error(ENOENT);
+        }
     }
 
     fn readdir(
@@ -576,8 +609,18 @@ impl Filesystem for HelloFS {
         reply.statfs(0, 0, 0, 7, 0, 512, 255, 0);
     }
 
-    fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
-        reply.ok();
+    fn getxattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, size: u32, reply: ReplyXattr) {
+        debug!("Getting xattr for: {}", ino);
+        reply.size(0);
+    }
+
+    fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
+        if self.ino_exists(&ino) {
+            debug!("Access granted for: {}", ino);
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
     }
 }
 
@@ -602,7 +645,7 @@ const fn is_file_ino(ino: u64) -> bool {
 
 fn main() {
     let config = config::standard();
-    let example_tags = vec!["all", "five"];
+    let example_tags: Vec<&str> = vec!["all", "five"];
 
     setup_logger();
 
@@ -639,8 +682,7 @@ fn main() {
     let paths = fs::read_dir(source_path).unwrap();
 
     let mut options = vec![
-        MountOption::RW, MountOption::FSName("miauw".to_string()),
-        MountOption::Sync, MountOption::DirSync,
+        MountOption::FSName("miauw".to_string()),
     ];
 
     if matches.get_flag("auto-unmount") {
@@ -728,6 +770,7 @@ fn main() {
         tag_inode_cache: inode_cache,
         fi_count,
         ti_count,
+        fh_count: 0,
     };
 
     fuser::mount2(filesystem, mountpoint, &options).unwrap();
@@ -911,6 +954,7 @@ mod test {
             tag_inode_cache: inode_cache,
             ti_count: 3,
             fi_count: 1,
+            fh_count: 0,
         };
 
         assert_eq!(
