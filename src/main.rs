@@ -367,10 +367,10 @@ impl Filesystem for HelloFS {
         return;
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, rino: u64, reply: ReplyAttr) {
+        let mut ino = rino;
         debug!("Getting attr for: {}", ino);
 
-        let mut ino = ino;
         if is_file_ino(ino) {
             // drop first 32 bits
             debug!("converted tagged ino into root ino for file: {}", ino);
@@ -385,46 +385,12 @@ impl Filesystem for HelloFS {
         } else if let Some((_, file)) = &self.files.iter().find(|(fk, f)| {
            f.inode == ino
         }) {
-            reply.attr(&TTL, &HelloFS::create_file_attrs(ino,file.fsize));
+            reply.attr(&TTL, &HelloFS::create_file_attrs(rino, file.fsize));
             return;
         }
 
         if ino == ROOT_INO {
-            reply.attr(&TTL, &HelloFS::create_folder_attrs(ino))
-        } else {
-            reply.error(ENOENT);
-        }
-    }
-
-    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
-        if self.ino_exists(&ino) {
-            debug!("Opened file: {}", ino);
-            reply.opened(self.get_next_file_handle(), 0);
-        } else {
-            debug!("File does not exist: {}", ino);
-            reply.error(ENOENT);
-        }
-    }
-
-    fn release(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-        if self.ino_exists(&ino) {
-            reply.ok();
-        } else {
-            reply.error(ENOENT);
-        }
-    }
-
-    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
-        if self.ino_exists(&ino) {
-            reply.opened(self.get_next_file_handle(), 0);
-        } else {
-            reply.error(ENOENT);
-        }
-    }
-
-    fn releasedir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, reply: ReplyEmpty) {
-        if self.ino_exists(&ino) {
-            reply.ok();
+            reply.attr(&TTL, &HelloFS::create_folder_attrs(rino))
         } else {
             reply.error(ENOENT);
         }
@@ -494,6 +460,23 @@ impl Filesystem for HelloFS {
         reply.error(ENOTSUP);
     }
 
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        let ino = if is_file_ino(ino) {
+            ino & !0u32 as u64
+        } else {
+            ino
+        };
+
+
+        if self.ino_exists(&ino) {
+            debug!("Opened file: {}", ino);
+            reply.opened(self.get_next_file_handle(), 0);
+        } else {
+            debug!("File does not exist: {}", ino);
+            reply.error(ENOENT);
+        }
+    }
+
     fn read(
         &mut self,
         _req: &Request,
@@ -535,6 +518,28 @@ impl Filesystem for HelloFS {
             } else {
                 reply.error(ENOENT);
             }
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn release(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+        let ino = if is_file_ino(ino) {
+            ino & !0u32 as u64
+        } else {
+            ino
+        };
+
+        if self.ino_exists(&ino) {
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if self.ino_exists(&ino) {
+            reply.opened(self.get_next_file_handle(), 0);
         } else {
             reply.error(ENOENT);
         }
@@ -604,6 +609,14 @@ impl Filesystem for HelloFS {
         reply.ok();
     }
 
+    fn releasedir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32, reply: ReplyEmpty) {
+        if self.ino_exists(&ino) {
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         debug!("statfs called");
         reply.statfs(0, 0, 0, 7, 0, 512, 255, 0);
@@ -615,6 +628,12 @@ impl Filesystem for HelloFS {
     }
 
     fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
+        let ino = if is_file_ino(ino) {
+            ino & !0u32 as u64
+        } else {
+            ino
+        };
+
         if self.ino_exists(&ino) {
             debug!("Access granted for: {}", ino);
             reply.ok();
