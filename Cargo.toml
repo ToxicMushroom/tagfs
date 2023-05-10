@@ -10,8 +10,10 @@ fuser = "0.12.0"
 clap = { version = "4.2.2", features = ["cargo"] }
 libc = "0.2.141"
 pretty_env_logger = "0.4.0"
-strum = "0.24.1"
-slotmap = { version = "1.0.6", features = ["serde"] }
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 serde = { version = "1.0", features = ["rc", "derive"] }
 log = "0.4"
+indexmap = { version = "1.9.3", features = ["serde"] }
+anyhow = "1.0.71"
+thiserror = "1.0.40"
+bimap = { version = "0.6.3", features = ["serde"] }
