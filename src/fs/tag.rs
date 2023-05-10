@@ -10,11 +10,11 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use bimap::BiMap;
 use bincode::serde::Compat;
-use fuser::FileType::{Directory, RegularFile};
 use fuser::{
-    FileAttr, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, Request,
+    FileAttr, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    Request,
 };
+use fuser::FileType::{Directory, RegularFile};
 use indexmap::IndexMap;
 use libc::{EIO, ENOENT, ENOTDIR, ENOTSUP};
 use log::{debug, error, warn};

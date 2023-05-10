@@ -7,7 +7,7 @@ By solving this problem with a file system we allow users to choose the file man
 ## usage
 
 Running the file system:
-`tagfs --auto-unmount <mountpoint> <source_path>`
+`tagfs -m <mountpoint> -s <source_path>`
 
 example fs root:
  - __all__ (default tag)

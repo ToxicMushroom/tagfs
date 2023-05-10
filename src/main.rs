@@ -1,8 +1,11 @@
 #![feature(cell_update)]
 
+use clap::Parser;
 use fuser::MountOption;
 use log::{error, LevelFilter};
 use pretty_env_logger::env_logger::Builder;
+
+use cli::Args;
 
 use crate::fs::backing::ExternalFS;
 use crate::fs::tag::TagFS;
@@ -11,21 +14,24 @@ mod file;
 
 mod fs;
 
+mod cli;
+
 fn main() -> std::io::Result<()> {
     setup_logger();
 
-    const PATH: &str = "source";
-    let backing = || ExternalFS::new(PATH);
+    let args = Args::parse();
 
-    let mut fs = match TagFS::new_from_save(backing()) {
+    let source_path = args.source_path.as_str();
+
+    let mut fs = match TagFS::new_from_save(ExternalFS::new(source_path)) {
         Ok(fs) => fs,
         Err(e) => {
             error!("Couldn't recover FS from savefile: {e}, creating empty FS");
-            TagFS::new(backing())
+            TagFS::new(ExternalFS::new(source_path))
         }
     };
 
-    let files = std::fs::read_dir(PATH)?
+    let files = std::fs::read_dir(source_path)?
         .filter_map(|e| {
             e.ok()
                 .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
@@ -36,7 +42,7 @@ fn main() -> std::io::Result<()> {
 
     fuser::mount2(
         fs,
-        "mount",
+        args.mount_path,
         &[MountOption::AutoUnmount, MountOption::AllowRoot],
     )
 }
