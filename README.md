@@ -30,8 +30,8 @@ example fs root:
 - [x] basic tagging
 - [x] renaming tags
 - [ ] remove tags
-- [ ] remove tag from file
-- [ ] save file
+- [X] remove tag from file
+- [X] save file
 - [ ] recovery of a file's tags on rename/move/inode change | portability of the save file
 - [ ] configuration for showing what tags and when (always show all tags even if empty, usefull for tagging new files)
 - [ ] configuration for where to locate untagged files (fs root or maybe some default folder)
