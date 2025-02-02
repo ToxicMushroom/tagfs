@@ -17,3 +17,9 @@ indexmap = { version = "1.9.3", features = ["serde"] }
 anyhow = "1.0.71"
 thiserror = "1.0.40"
 bimap = { version = "0.6.3", features = ["serde"] }
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+async-channel = "2.3.1"
+
+[build-dependencies]
+glib-build-tools = "0.20"

@@ -10,11 +10,11 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use bimap::BiMap;
 use bincode::serde::Compat;
+use fuser::FileType::{Directory, RegularFile};
 use fuser::{
     FileAttr, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     Request,
 };
-use fuser::FileType::{Directory, RegularFile};
 use indexmap::IndexMap;
 use libc::{EIO, ENOENT, ENOTDIR, ENOTSUP};
 use log::{debug, error, warn};
@@ -42,7 +42,7 @@ pub struct Tag(pub OsString);
 /// which is some intersection of tags composed by the tag of this node and its parents.
 struct TagNode {
     /// The unique *inode* tag part for this node
-    ino_part: u64,
+    ino_part: u32,
     /// The number of the single tag represented by this node, which may be the same as
     /// `ino_part`, but this is usually not the case.
     tag: TagNumber,
@@ -83,8 +83,9 @@ impl Debug for TagNode {
 #[derive(Debug)]
 pub struct TagTree {
     root: Rc<RefCell<TagNode>>,
-    cache: HashMap<u64, Weak<RefCell<TagNode>>>,
-    counter: u64,
+    cache: HashMap<TagNumber, Weak<RefCell<TagNode>>>,
+    // Incremental assignment of tag-ids
+    counter: TagNumber,
 }
 
 impl Default for TagTree {
@@ -95,22 +96,23 @@ impl Default for TagTree {
 
 impl TagTree {
     fn new() -> Self {
-        let root_no = Ino::ROOT.0;
+        let root_no = Ino::ROOT;
         let root = Rc::new(RefCell::new(TagNode {
-            ino_part: root_no,
-            tag: root_no,
+            ino_part: root_no.file(),
+            tag: root_no.tag(),
             children: Vec::new(),
             parent: None,
         }));
         let weak = Rc::downgrade(&root);
+
         Self {
             root,
-            cache: HashMap::from_iter(iter::once((root_no, weak))),
-            counter: root_no,
+            cache: HashMap::from_iter(iter::once((root_no.tag(), weak))),
+            counter: root_no.tag(),
         }
     }
 
-    fn lookup(&self, tag: u64) -> Option<Rc<RefCell<TagNode>>> {
+    fn lookup(&self, tag: TagNumber) -> Option<Rc<RefCell<TagNode>>> {
         self.cache.get(&tag).and_then(|w| w.upgrade())
     }
 
@@ -149,9 +151,9 @@ impl TagTree {
     }
 
     /// Create a TagNode for an entirely new tag
-    fn create_new(&mut self) -> u64 {
+    fn create_new(&mut self) -> TagNumber {
         let root = self.root.clone();
-        let tnb = self.counter + 1;
+        let tnb: TagNumber = self.counter + 1;
         self.add_to(root, tnb);
 
         tnb

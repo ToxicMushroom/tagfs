@@ -16,8 +16,8 @@ const ROOT_INO: u64 = 1;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Ino(pub u64);
 
-pub type FileNumber = u64;
-pub type TagNumber = u64;
+pub type FileNumber = u32;
+pub type TagNumber = u32;
 
 impl Ino {
     pub fn is_tag(&self) -> bool {
@@ -29,20 +29,20 @@ impl Ino {
     }
 
     pub fn file(&self) -> FileNumber {
-        self.0 >> SPLIT
+        (self.0 >> SPLIT) as FileNumber
     }
 
     pub fn tag(&self) -> TagNumber {
-        self.0 & (!0 >> SPLIT)
+        (self.0 & (!0 >> SPLIT)) as TagNumber
     }
 
     /// Construct [Ino] from a file and tag part, both unshifted.
     /// If the file part is shifted, just use the Ino constructor.
-    pub fn from_parts(file: u64, tag: u64) -> Ino {
-        Ino((file << SPLIT) | tag)
+    pub fn from_parts(file: u32, tag: u32) -> Ino {
+        Ino(((file as u64) << SPLIT) | tag as u64)
     }
 
-    pub fn from_tag(tag: u64) -> Ino {
+    pub fn from_tag(tag: u32) -> Ino {
         Ino::from_parts(0, tag)
     }
 
